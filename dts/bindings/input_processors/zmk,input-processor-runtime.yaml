@@ -132,3 +132,17 @@ properties:
   y-invert:
     type: boolean
     description: If present, invert Y axis values (positive becomes negative and vice versa)
+
+  momentum-enabled:
+    type: boolean
+    description: If present, enable momentum scrolling for wheel-style relative input
+
+  momentum-decay-ms:
+    type: int
+    default: 240
+    description: Time window in milliseconds for decaying momentum velocity toward zero
+
+  momentum-min-velocity:
+    type: int
+    default: 1
+    description: Minimum absolute velocity required to keep momentum scrolling active

@@ -11,4 +11,8 @@ config ZMK_RUNTIME_INPUT_PROCESSOR_NAME_MAX_LEN
     int "Maximum length of runtime input processor names"
     default 8
 
+config ZMK_RUNTIME_INPUT_PROCESSOR_MOMENTUM
+    bool "Enable momentum scrolling support"
+    default n
+
 endif

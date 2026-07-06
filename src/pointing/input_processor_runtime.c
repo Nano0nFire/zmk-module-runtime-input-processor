@@ -11,6 +11,7 @@
 #include <zephyr/device.h>
 #include <zephyr/dt-bindings/input/input-event-codes.h>
 #include <zephyr/kernel.h>
+#include <zephyr/input/input.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/sys/dlist.h>
 
@@ -61,6 +62,9 @@ struct runtime_processor_config {
     // Axis reverse default settings from DT
     bool initial_x_invert;
     bool initial_y_invert;
+    bool initial_momentum_enabled;
+    uint16_t initial_momentum_decay_ms;
+    uint16_t initial_momentum_min_velocity;
 };
 
 struct runtime_processor_data {
@@ -134,13 +138,25 @@ struct runtime_processor_data {
     bool persistent_x_invert;
     bool persistent_y_invert;
 
+    bool momentum_enabled;
+    uint16_t momentum_decay_ms;
+    uint16_t momentum_min_velocity;
+
+    bool persistent_momentum_enabled;
+    uint16_t persistent_momentum_decay_ms;
+    uint16_t persistent_momentum_min_velocity;
+
     // Temp-layer runtime state
     struct k_work_delayable temp_layer_activation_work;
     struct k_work_delayable temp_layer_deactivation_work;
+    struct k_work_delayable momentum_work;
     bool temp_layer_layer_active;
     bool temp_layer_keep_active; // Set by behavior to prevent deactivation
     int64_t last_input_timestamp;
     int64_t last_keypress_timestamp;
+    const struct device *momentum_source_dev;
+    uint16_t momentum_code;
+    int32_t momentum_velocity;
 };
 
 static void update_rotation_values(struct runtime_processor_data *data) {
@@ -196,6 +212,52 @@ static void temp_layer_deactivation_work_handler(struct k_work *work) {
     } else {
         LOG_ERR("Failed to deactivate temp-layer layer %d: %d", data->temp_layer_layer, ret);
     }
+}
+
+static uint32_t momentum_step_ms(const struct runtime_processor_data *data) {
+    if (data->momentum_decay_ms == 0) {
+        return 16;
+    }
+
+    uint32_t step = data->momentum_decay_ms / 8;
+    return step < 16 ? 16 : step;
+}
+
+static void momentum_work_handler(struct k_work *work) {
+    struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+    struct runtime_processor_data *data =
+        CONTAINER_OF(dwork, struct runtime_processor_data, momentum_work);
+
+    if (!data->momentum_enabled || data->momentum_source_dev == NULL || data->momentum_velocity == 0) {
+        return;
+    }
+
+    int32_t velocity = data->momentum_velocity;
+    int32_t sign = velocity > 0 ? 1 : -1;
+    uint32_t abs_velocity = velocity > 0 ? (uint32_t)velocity : (uint32_t)(-velocity);
+    uint32_t step_ms = momentum_step_ms(data);
+    uint32_t decay_ms = data->momentum_decay_ms == 0 ? step_ms : data->momentum_decay_ms;
+    uint32_t delta = (abs_velocity * step_ms + decay_ms - 1) / decay_ms;
+
+    if (delta == 0) {
+        delta = 1;
+    }
+
+    if (abs_velocity <= delta) {
+        data->momentum_velocity = 0;
+        return;
+    }
+
+    abs_velocity -= delta;
+    if (abs_velocity < data->momentum_min_velocity) {
+        data->momentum_velocity = 0;
+        return;
+    }
+
+    data->momentum_velocity = (int32_t)abs_velocity * sign;
+    input_report_rel(data->momentum_source_dev, data->momentum_code, data->momentum_velocity, true,
+                     K_NO_WAIT);
+    k_work_reschedule(&data->momentum_work, K_MSEC(step_ms));
 }
 
 static int code_idx(uint16_t code, const uint16_t *list, size_t len) {
@@ -469,6 +531,15 @@ static int runtime_processor_handle_event(const struct device *dev, struct input
                           K_MSEC(data->temp_layer_deactivation_delay_ms));
     }
 
+    if (data->momentum_enabled && (event->code == INPUT_REL_WHEEL || event->code == INPUT_REL_HWHEEL) &&
+        event->value != 0) {
+        data->momentum_source_dev = event->dev;
+        data->momentum_code = event->code;
+        data->momentum_velocity = event->value;
+        k_work_cancel_delayable(&data->momentum_work);
+        k_work_reschedule(&data->momentum_work, K_MSEC(momentum_step_ms(data)));
+    }
+
     return ZMK_INPUT_PROC_CONTINUE;
 }
 
@@ -493,6 +564,9 @@ struct processor_settings {
     bool xy_swap_enabled;
     bool x_invert;
     bool y_invert;
+    bool momentum_enabled;
+    uint16_t momentum_decay_ms;
+    uint16_t momentum_min_velocity;
 };
 
 static void save_processor_settings_work_handler(struct k_work *work) {
@@ -518,6 +592,9 @@ static void save_processor_settings_work_handler(struct k_work *work) {
         .xy_swap_enabled = data->persistent_xy_swap_enabled,
         .x_invert = data->persistent_x_invert,
         .y_invert = data->persistent_y_invert,
+        .momentum_enabled = data->persistent_momentum_enabled,
+        .momentum_decay_ms = data->persistent_momentum_decay_ms,
+        .momentum_min_velocity = data->persistent_momentum_min_velocity,
     };
 
     char path[64];
@@ -563,6 +640,9 @@ static int load_processor_settings_cb(const char *name, size_t len, settings_rea
             data->persistent_xy_swap_enabled = settings.xy_swap_enabled;
             data->persistent_x_invert = settings.x_invert;
             data->persistent_y_invert = settings.y_invert;
+            data->persistent_momentum_enabled = settings.momentum_enabled;
+            data->persistent_momentum_decay_ms = settings.momentum_decay_ms;
+            data->persistent_momentum_min_velocity = settings.momentum_min_velocity;
 
             // Apply to current values
             data->scale_multiplier = settings.scale_multiplier;
@@ -580,6 +660,9 @@ static int load_processor_settings_cb(const char *name, size_t len, settings_rea
             data->xy_swap_enabled = settings.xy_swap_enabled;
             data->x_invert = settings.x_invert;
             data->y_invert = settings.y_invert;
+            data->momentum_enabled = settings.momentum_enabled;
+            data->momentum_decay_ms = settings.momentum_decay_ms;
+            data->momentum_min_velocity = settings.momentum_min_velocity;
             update_rotation_values(data);
 
             LOG_INF("Loaded settings for %s: scale=%d/%d, rotation=%d, "
@@ -663,6 +746,12 @@ static int runtime_processor_init(const struct device *dev) {
     data->y_invert = cfg->initial_y_invert;
     data->persistent_x_invert = cfg->initial_x_invert;
     data->persistent_y_invert = cfg->initial_y_invert;
+    data->momentum_enabled = cfg->initial_momentum_enabled;
+    data->momentum_decay_ms = cfg->initial_momentum_decay_ms;
+    data->momentum_min_velocity = cfg->initial_momentum_min_velocity;
+    data->persistent_momentum_enabled = cfg->initial_momentum_enabled;
+    data->persistent_momentum_decay_ms = cfg->initial_momentum_decay_ms;
+    data->persistent_momentum_min_velocity = cfg->initial_momentum_min_velocity;
 
     update_rotation_values(data);
 
@@ -674,6 +763,7 @@ static int runtime_processor_init(const struct device *dev) {
     k_work_init_delayable(&data->temp_layer_activation_work, temp_layer_activation_work_handler);
     k_work_init_delayable(&data->temp_layer_deactivation_work,
                           temp_layer_deactivation_work_handler);
+    k_work_init_delayable(&data->momentum_work, momentum_work_handler);
 
     LOG_INF("Runtime processor '%s' initialized", cfg->name);
 
@@ -795,12 +885,21 @@ int zmk_input_processor_runtime_reset(const struct device *dev) {
         zmk_keymap_layer_deactivate(data->temp_layer_layer, false);
         data->temp_layer_layer_active = false;
     }
+    k_work_cancel_delayable(&data->momentum_work);
+    data->momentum_velocity = 0;
+    data->momentum_source_dev = NULL;
 
     // Reset axis invert settings to defaults
     data->x_invert = cfg->initial_x_invert;
     data->y_invert = cfg->initial_y_invert;
     data->persistent_x_invert = cfg->initial_x_invert;
     data->persistent_y_invert = cfg->initial_y_invert;
+    data->momentum_enabled = cfg->initial_momentum_enabled;
+    data->momentum_decay_ms = cfg->initial_momentum_decay_ms;
+    data->momentum_min_velocity = cfg->initial_momentum_min_velocity;
+    data->persistent_momentum_enabled = cfg->initial_momentum_enabled;
+    data->persistent_momentum_decay_ms = cfg->initial_momentum_decay_ms;
+    data->persistent_momentum_min_velocity = cfg->initial_momentum_min_velocity;
 
     update_rotation_values(data);
 
@@ -840,6 +939,9 @@ void zmk_input_processor_runtime_restore_persistent(const struct device *dev) {
     // Restore axis invert settings
     data->x_invert = data->persistent_x_invert;
     data->y_invert = data->persistent_y_invert;
+    data->momentum_enabled = data->persistent_momentum_enabled;
+    data->momentum_decay_ms = data->persistent_momentum_decay_ms;
+    data->momentum_min_velocity = data->persistent_momentum_min_velocity;
 
     LOG_DBG("Restored persistent values");
 }
@@ -873,6 +975,9 @@ int zmk_input_processor_runtime_get_config(const struct device *dev, const char 
         config->xy_swap_enabled = data->persistent_xy_swap_enabled;
         config->x_invert = data->persistent_x_invert;
         config->y_invert = data->persistent_y_invert;
+        config->momentum_enabled = data->persistent_momentum_enabled;
+        config->momentum_decay_ms = data->persistent_momentum_decay_ms;
+        config->momentum_min_velocity = data->persistent_momentum_min_velocity;
     }
 
     return 0;
@@ -929,6 +1034,9 @@ int zmk_input_processor_runtime_get_config(const struct device *dev, const char 
         .initial_xy_swap_enabled = DT_INST_PROP(n, xy_swap_enabled),                               \
         .initial_x_invert = DT_INST_PROP(n, x_invert),                                             \
         .initial_y_invert = DT_INST_PROP(n, y_invert),                                             \
+        .initial_momentum_enabled = DT_INST_PROP(n, momentum_enabled),                             \
+        .initial_momentum_decay_ms = DT_INST_PROP_OR(n, momentum_decay_ms, 240),                   \
+        .initial_momentum_min_velocity = DT_INST_PROP_OR(n, momentum_min_velocity, 1),             \
     };                                                                                             \
     static struct runtime_processor_data runtime_data_##n;                                         \
     DEVICE_DT_INST_DEFINE(n, &runtime_processor_init, NULL, &runtime_data_##n,                     \
@@ -1602,4 +1710,70 @@ int zmk_input_processor_runtime_set_xy_swap_enabled(const struct device *dev, bo
 #endif
 
     return ret;
+}
+
+int zmk_input_processor_runtime_set_momentum(const struct device *dev, bool enabled,
+                                             uint16_t decay_ms, uint16_t min_velocity,
+                                             bool persistent) {
+    if (!dev) {
+        return -EINVAL;
+    }
+
+    struct runtime_processor_data *data = dev->data;
+    data->momentum_enabled = enabled;
+    data->momentum_decay_ms = decay_ms;
+    data->momentum_min_velocity = min_velocity;
+
+    if (persistent) {
+        data->persistent_momentum_enabled = enabled;
+        data->persistent_momentum_decay_ms = decay_ms;
+        data->persistent_momentum_min_velocity = min_velocity;
+    }
+
+    LOG_INF("Momentum config: enabled=%d decay=%d min_velocity=%d%s", enabled, decay_ms,
+            min_velocity, persistent ? " (persistent)" : " (temporary)");
+
+    int ret = 0;
+#if IS_ENABLED(CONFIG_SETTINGS)
+    if (persistent) {
+        ret = schedule_save_processor_settings(dev);
+        raise_state_changed_event(dev);
+    }
+#endif
+
+    return ret;
+}
+
+int zmk_input_processor_runtime_set_momentum_enabled(const struct device *dev, bool enabled,
+                                                     bool persistent) {
+    if (!dev) {
+        return -EINVAL;
+    }
+
+    struct runtime_processor_data *data = dev->data;
+    return zmk_input_processor_runtime_set_momentum(
+        dev, enabled, data->momentum_decay_ms, data->momentum_min_velocity, persistent);
+}
+
+int zmk_input_processor_runtime_set_momentum_decay(const struct device *dev, uint16_t decay_ms,
+                                                   bool persistent) {
+    if (!dev) {
+        return -EINVAL;
+    }
+
+    struct runtime_processor_data *data = dev->data;
+    return zmk_input_processor_runtime_set_momentum(
+        dev, data->momentum_enabled, decay_ms, data->momentum_min_velocity, persistent);
+}
+
+int zmk_input_processor_runtime_set_momentum_min_velocity(const struct device *dev,
+                                                          uint16_t min_velocity,
+                                                          bool persistent) {
+    if (!dev) {
+        return -EINVAL;
+    }
+
+    struct runtime_processor_data *data = dev->data;
+    return zmk_input_processor_runtime_set_momentum(
+        dev, data->momentum_enabled, data->momentum_decay_ms, min_velocity, persistent);
 }

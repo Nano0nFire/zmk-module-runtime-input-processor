@@ -42,6 +42,9 @@ struct zmk_input_processor_runtime_config {
     // Axis reverse settings
     bool x_invert; // Whether to invert X axis
     bool y_invert; // Whether to invert Y axis
+    bool momentum_enabled;
+    uint16_t momentum_decay_ms;
+    uint16_t momentum_min_velocity;
 };
 
 /**
@@ -300,3 +303,14 @@ int zmk_input_processor_runtime_set_x_invert(const struct device *dev, bool inve
  */
 int zmk_input_processor_runtime_set_y_invert(const struct device *dev, bool invert,
                                              bool persistent);
+
+int zmk_input_processor_runtime_set_momentum(const struct device *dev, bool enabled,
+                                             uint16_t decay_ms, uint16_t min_velocity,
+                                             bool persistent);
+int zmk_input_processor_runtime_set_momentum_enabled(const struct device *dev, bool enabled,
+                                                     bool persistent);
+int zmk_input_processor_runtime_set_momentum_decay(const struct device *dev, uint16_t decay_ms,
+                                                   bool persistent);
+int zmk_input_processor_runtime_set_momentum_min_velocity(const struct device *dev,
+                                                          uint16_t min_velocity,
+                                                          bool persistent);

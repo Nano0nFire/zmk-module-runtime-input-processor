@@ -33,6 +33,9 @@ message InputProcessorInfo {
     // Axis invert settings
     bool x_invert = 16; // Whether to invert X axis
     bool y_invert = 17; // Whether to invert Y axis
+    bool momentum_enabled = 18;
+    uint32 momentum_decay_ms = 19;
+    uint32 momentum_min_velocity = 20;
 }
 
 message ListInputProcessorsRequest {
@@ -205,6 +208,30 @@ message SetYInvertResponse {
     // Empty - use notification to report changes
 }
 
+message SetMomentumEnabledRequest {
+    uint32 id = 1;
+    bool enabled = 2;
+}
+
+message SetMomentumEnabledResponse {
+}
+
+message SetMomentumDecayRequest {
+    uint32 id = 1;
+    uint32 decay_ms = 2;
+}
+
+message SetMomentumDecayResponse {
+}
+
+message SetMomentumMinVelocityRequest {
+    uint32 id = 1;
+    uint32 min_velocity = 2;
+}
+
+message SetMomentumMinVelocityResponse {
+}
+
 message Request {
     oneof request_type {
         ListInputProcessorsRequest list_input_processors = 1;
@@ -226,6 +253,9 @@ message Request {
         SetXySwapEnabledRequest set_xy_swap_enabled = 17;
         SetXInvertRequest set_x_invert = 18;
         SetYInvertRequest set_y_invert = 19;
+        SetMomentumEnabledRequest set_momentum_enabled = 20;
+        SetMomentumDecayRequest set_momentum_decay = 21;
+        SetMomentumMinVelocityRequest set_momentum_min_velocity = 22;
     }
 }
 
@@ -253,6 +283,9 @@ message Response {
         SetXySwapEnabledResponse set_xy_swap_enabled = 18;
         SetXInvertResponse set_x_invert = 19;
         SetYInvertResponse set_y_invert = 20;
+        SetMomentumEnabledResponse set_momentum_enabled = 21;
+        SetMomentumDecayResponse set_momentum_decay = 22;
+        SetMomentumMinVelocityResponse set_momentum_min_velocity = 23;
     }
 }
 

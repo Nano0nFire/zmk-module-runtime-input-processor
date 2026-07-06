@@ -25,6 +25,8 @@
 		temp-layer-transparent-behavior = <&trans>;
 		temp-layer-kp-behavior = <&kp>;
 		temp-layer-keep-keycodes = <LEFT_CONTROL LEFT_SHIFT LEFT_ALT LEFT_GUI RIGHT_CONTROL RIGHT_SHIFT RIGHT_ALT RIGHT_GUI>;
+		momentum-decay-ms = <240>;
+		momentum-min-velocity = <1>;
 
 		#input-processor-cells = <0>;
 	};
@@ -45,6 +47,8 @@
 		temp-layer-transparent-behavior = <&trans>;
 		temp-layer-kp-behavior = <&kp>;
 		temp-layer-keep-keycodes = <LEFT_CONTROL LEFT_SHIFT LEFT_ALT LEFT_GUI RIGHT_CONTROL RIGHT_SHIFT RIGHT_ALT RIGHT_GUI>;
+		momentum-decay-ms = <240>;
+		momentum-min-velocity = <1>;
 
 		#input-processor-cells = <0>;
 	};

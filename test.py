@@ -100,5 +100,26 @@ class MomentumScaffoldingTests(unittest.TestCase):
         self.assertIn("Momentum Scrolling", readme_text)
         self.assertIn("momentum-enabled", readme_text)
 
+    def test_binding_schema_mentions_momentum_properties(self):
+        binding_text = (
+            THIS_DIR / "dts" / "bindings" / "input_processors" / "zmk,input-processor-runtime.yaml"
+        ).read_text()
+        self.assertIn("momentum-enabled:", binding_text)
+        self.assertIn("momentum-decay-ms:", binding_text)
+        self.assertIn("momentum-min-velocity:", binding_text)
+
+    def test_default_dtsi_exposes_momentum_defaults(self):
+        dtsi_text = (
+            THIS_DIR / "dts" / "input" / "processors" / "runtime-input-processor.dtsi"
+        ).read_text()
+        self.assertIn("momentum-decay-ms = <240>;", dtsi_text)
+        self.assertIn("momentum-min-velocity = <1>;", dtsi_text)
+
+    def test_default_dtsi_keeps_momentum_disabled(self):
+        dtsi_text = (
+            THIS_DIR / "dts" / "input" / "processors" / "runtime-input-processor.dtsi"
+        ).read_text()
+        self.assertNotIn("momentum-enabled;", dtsi_text)
+
 if __name__ == "__main__":
     unittest.main()

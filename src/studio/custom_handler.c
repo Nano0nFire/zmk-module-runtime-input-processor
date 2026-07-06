@@ -74,6 +74,12 @@ static int handle_set_x_invert(const cormoran_rip_SetXInvertRequest *req,
                                cormoran_rip_Response *resp);
 static int handle_set_y_invert(const cormoran_rip_SetYInvertRequest *req,
                                cormoran_rip_Response *resp);
+static int handle_set_momentum_enabled(const cormoran_rip_SetMomentumEnabledRequest *req,
+                                       cormoran_rip_Response *resp);
+static int handle_set_momentum_decay(const cormoran_rip_SetMomentumDecayRequest *req,
+                                     cormoran_rip_Response *resp);
+static int handle_set_momentum_min_velocity(
+    const cormoran_rip_SetMomentumMinVelocityRequest *req, cormoran_rip_Response *resp);
 
 /**
  * Main request handler for the custom RPC subsystem.
@@ -156,6 +162,15 @@ static bool rip_rpc_handle_request(const zmk_custom_CallRequest *raw_request,
         break;
     case cormoran_rip_Request_set_y_invert_tag:
         rc = handle_set_y_invert(&req.request_type.set_y_invert, resp);
+        break;
+    case cormoran_rip_Request_set_momentum_enabled_tag:
+        rc = handle_set_momentum_enabled(&req.request_type.set_momentum_enabled, resp);
+        break;
+    case cormoran_rip_Request_set_momentum_decay_tag:
+        rc = handle_set_momentum_decay(&req.request_type.set_momentum_decay, resp);
+        break;
+    case cormoran_rip_Request_set_momentum_min_velocity_tag:
+        rc = handle_set_momentum_min_velocity(&req.request_type.set_momentum_min_velocity, resp);
         break;
     default:
         LOG_WRN("Unsupported rip request type: %d", req.which_request_type);
@@ -261,6 +276,9 @@ static int handle_get_input_processor(const cormoran_rip_GetInputProcessorReques
     result.processor.axis_snap_timeout_ms = config.axis_snap_timeout_ms;
     result.processor.x_invert = config.x_invert;
     result.processor.y_invert = config.y_invert;
+    result.processor.momentum_enabled = config.momentum_enabled;
+    result.processor.momentum_decay_ms = config.momentum_decay_ms;
+    result.processor.momentum_min_velocity = config.momentum_min_velocity;
 
     resp->which_response_type = cormoran_rip_Response_get_input_processor_tag;
     resp->response_type.get_input_processor = result;
@@ -790,6 +808,67 @@ static int handle_set_xy_swap_enabled(const cormoran_rip_SetXySwapEnabledRequest
     resp->response_type.set_xy_swap_enabled =
         (cormoran_rip_SetXySwapEnabledResponse)cormoran_rip_SetXySwapEnabledResponse_init_zero;
 
+    return 0;
+}
+
+static int handle_set_momentum_enabled(const cormoran_rip_SetMomentumEnabledRequest *req,
+                                       cormoran_rip_Response *resp) {
+    const struct device *dev = zmk_input_processor_runtime_find_by_id(req->id);
+    if (!dev) {
+        LOG_WRN("Input processor not found: id=%d", req->id);
+        return -ENODEV;
+    }
+
+    int ret = zmk_input_processor_runtime_set_momentum_enabled(dev, req->enabled, true);
+    if (ret < 0) {
+        LOG_ERR("Failed to set momentum enabled: %d", ret);
+        return ret;
+    }
+
+    resp->which_response_type = cormoran_rip_Response_set_momentum_enabled_tag;
+    resp->response_type.set_momentum_enabled =
+        (cormoran_rip_SetMomentumEnabledResponse)cormoran_rip_SetMomentumEnabledResponse_init_zero;
+    return 0;
+}
+
+static int handle_set_momentum_decay(const cormoran_rip_SetMomentumDecayRequest *req,
+                                     cormoran_rip_Response *resp) {
+    const struct device *dev = zmk_input_processor_runtime_find_by_id(req->id);
+    if (!dev) {
+        LOG_WRN("Input processor not found: id=%d", req->id);
+        return -ENODEV;
+    }
+
+    int ret = zmk_input_processor_runtime_set_momentum_decay(dev, req->decay_ms, true);
+    if (ret < 0) {
+        LOG_ERR("Failed to set momentum decay: %d", ret);
+        return ret;
+    }
+
+    resp->which_response_type = cormoran_rip_Response_set_momentum_decay_tag;
+    resp->response_type.set_momentum_decay =
+        (cormoran_rip_SetMomentumDecayResponse)cormoran_rip_SetMomentumDecayResponse_init_zero;
+    return 0;
+}
+
+static int handle_set_momentum_min_velocity(
+    const cormoran_rip_SetMomentumMinVelocityRequest *req, cormoran_rip_Response *resp) {
+    const struct device *dev = zmk_input_processor_runtime_find_by_id(req->id);
+    if (!dev) {
+        LOG_WRN("Input processor not found: id=%d", req->id);
+        return -ENODEV;
+    }
+
+    int ret = zmk_input_processor_runtime_set_momentum_min_velocity(dev, req->min_velocity, true);
+    if (ret < 0) {
+        LOG_ERR("Failed to set momentum min velocity: %d", ret);
+        return ret;
+    }
+
+    resp->which_response_type = cormoran_rip_Response_set_momentum_min_velocity_tag;
+    resp->response_type.set_momentum_min_velocity =
+        (cormoran_rip_SetMomentumMinVelocityResponse)
+            cormoran_rip_SetMomentumMinVelocityResponse_init_zero;
     return 0;
 }
 

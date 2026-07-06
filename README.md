@@ -10,6 +10,7 @@ This ZMK module provides runtime configurable input processors for pointing devi
 - **Rotation Support**: Apply rotation transformations in degrees (fully implemented with paired X/Y handling)
 - **Axis Reversing**: Invert X and/or Y axis independently to reverse input direction
 - **Axis Snapping**: Lock scrolling to X or Y axis with threshold-based unlock
+- **Momentum Scrolling**: Continue scroll motion with configurable decay and stop threshold
 - **Temp-Layer Layer**: Automatically activate a layer when using pointing device, deactivate on key press or timeout
 - **Active Layers**: Specify which layers the processor should be active on using a bitmask
 - **Temporary Changes**: Hold a key to temporarily change settings (perfect for DPI toggle)
@@ -109,6 +110,11 @@ CONFIG_ZMK_RUNTIME_INPUT_PROCESSOR_STUDIO_RPC=y
 		temp-layer-transparent-behavior = <&trans>;
 		temp-layer-kp-behavior = <&kp>;
 		temp-layer-keep-keycodes = <LEFT_CONTROL LEFT_SHIFT LEFT_ALT LEFT_GUI RIGHT_CONTROL RIGHT_SHIFT RIGHT_ALT RIGHT_GUI>;
+
+		// Optional: Momentum scrolling defaults
+		momentum-enabled;
+		momentum-decay-ms = <240>;
+		momentum-min-velocity = <1>;
 
 		#input-processor-cells = <0>;
 	};
