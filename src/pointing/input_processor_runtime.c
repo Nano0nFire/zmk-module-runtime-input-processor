@@ -156,7 +156,15 @@ struct runtime_processor_data {
     int64_t last_keypress_timestamp;
     const struct device *momentum_source_dev;
     uint16_t momentum_code;
+    // Velocity in Q8 fixed-point wheel counts per second (counts/sec * 256),
+    // estimated from event size / inter-event interval while scrolling.
     int32_t momentum_velocity;
+    int64_t momentum_last_event_ts;
+    // Fractional emission accumulator (Q8 wheel counts) so slow tails can
+    // emit less than one count per tick without stalling.
+    int32_t momentum_out_accum;
+    // Guards against re-capturing our own injected wheel events.
+    bool momentum_injecting;
 };
 
 static void update_rotation_values(struct runtime_processor_data *data) {
@@ -214,13 +222,18 @@ static void temp_layer_deactivation_work_handler(struct k_work *work) {
     }
 }
 
-static uint32_t momentum_step_ms(const struct runtime_processor_data *data) {
-    if (data->momentum_decay_ms == 0) {
-        return 16;
-    }
+// Fixed tick for momentum decay/emission; 16 ms ~= 60 Hz for smooth motion.
+#define MOMENTUM_TICK_MS 16
+// Delay after the last real wheel event before coasting starts. While the
+// user keeps scrolling, every event pushes the work past this window.
+#define MOMENTUM_RELEASE_MS 40
+// Clamp for inter-event intervals used in velocity estimation.
+#define MOMENTUM_DT_MIN_MS 4
+#define MOMENTUM_DT_MAX_MS 100
 
-    uint32_t step = data->momentum_decay_ms / 8;
-    return step < 16 ? 16 : step;
+static void momentum_stop(struct runtime_processor_data *data) {
+    data->momentum_velocity = 0;
+    data->momentum_out_accum = 0;
 }
 
 static void momentum_work_handler(struct k_work *work) {
@@ -228,36 +241,48 @@ static void momentum_work_handler(struct k_work *work) {
     struct runtime_processor_data *data =
         CONTAINER_OF(dwork, struct runtime_processor_data, momentum_work);
 
-    if (!data->momentum_enabled || data->momentum_source_dev == NULL || data->momentum_velocity == 0) {
+    if (!data->momentum_enabled || data->momentum_source_dev == NULL ||
+        data->momentum_velocity == 0) {
         return;
     }
 
-    int32_t velocity = data->momentum_velocity;
-    int32_t sign = velocity > 0 ? 1 : -1;
-    uint32_t abs_velocity = velocity > 0 ? (uint32_t)velocity : (uint32_t)(-velocity);
-    uint32_t step_ms = momentum_step_ms(data);
-    uint32_t decay_ms = data->momentum_decay_ms == 0 ? step_ms : data->momentum_decay_ms;
-    uint32_t delta = (abs_velocity * step_ms + decay_ms - 1) / decay_ms;
-
-    if (delta == 0) {
-        delta = 1;
+    // Exponential decay with time constant momentum_decay_ms: speed drops to
+    // ~37% after decay_ms and ~5% after 3x. A zero decay disables coasting.
+    int32_t tau_ms = (int32_t)data->momentum_decay_ms;
+    if (tau_ms == 0) {
+        momentum_stop(data);
+        return;
     }
+    if (tau_ms < MOMENTUM_TICK_MS) {
+        tau_ms = MOMENTUM_TICK_MS;
+    }
+    data->momentum_velocity -= (data->momentum_velocity * MOMENTUM_TICK_MS) / tau_ms;
 
-    if (abs_velocity <= delta) {
-        data->momentum_velocity = 0;
+    // momentum_min_velocity is in wheel counts per second; never coast below
+    // one count per second regardless of the setting.
+    int32_t min_velocity = (int32_t)data->momentum_min_velocity * 256;
+    if (min_velocity < 256) {
+        min_velocity = 256;
+    }
+    int32_t abs_velocity =
+        data->momentum_velocity >= 0 ? data->momentum_velocity : -data->momentum_velocity;
+    if (abs_velocity < min_velocity) {
+        momentum_stop(data);
         return;
     }
 
-    abs_velocity -= delta;
-    if (abs_velocity < data->momentum_min_velocity) {
-        data->momentum_velocity = 0;
-        return;
+    // Integrate velocity over the tick and emit whole counts, carrying the
+    // fraction so slow tails still move (less than one count per tick).
+    data->momentum_out_accum += (data->momentum_velocity * MOMENTUM_TICK_MS) / 1000;
+    int32_t whole = data->momentum_out_accum / 256;
+    if (whole != 0) {
+        data->momentum_out_accum -= whole * 256;
+        data->momentum_injecting = true;
+        input_report_rel(data->momentum_source_dev, data->momentum_code, whole, true, K_NO_WAIT);
+        data->momentum_injecting = false;
     }
 
-    data->momentum_velocity = (int32_t)abs_velocity * sign;
-    input_report_rel(data->momentum_source_dev, data->momentum_code, data->momentum_velocity, true,
-                     K_NO_WAIT);
-    k_work_reschedule(&data->momentum_work, K_MSEC(step_ms));
+    k_work_reschedule(&data->momentum_work, K_MSEC(MOMENTUM_TICK_MS));
 }
 
 static int code_idx(uint16_t code, const uint16_t *list, size_t len) {
@@ -303,16 +328,18 @@ static int scale_val(struct input_event *event, uint32_t mul, uint32_t div,
         return ZMK_INPUT_PROC_CONTINUE;
     }
 
-    int16_t value_mul = event->value * (int16_t)mul;
+    // 32-bit math: with fractional settings the multiplier can reach ~1000
+    // (e.g. 999/100), which overflows int16 for even moderate deltas.
+    int32_t value_mul = (int32_t)event->value * (int32_t)mul;
 
     if (state && state->remainder) {
         value_mul += *state->remainder;
     }
 
-    int16_t scaled = value_mul / (int16_t)div;
+    int32_t scaled = value_mul / (int32_t)div;
 
     if (state && state->remainder) {
-        *state->remainder = value_mul - (scaled * (int16_t)div);
+        *state->remainder = (int16_t)(value_mul - (scaled * (int32_t)div));
     }
 
     LOG_DBG("scaled %d with %d/%d to %d", event->value, mul, div, scaled);
@@ -531,13 +558,36 @@ static int runtime_processor_handle_event(const struct device *dev, struct input
                           K_MSEC(data->temp_layer_deactivation_delay_ms));
     }
 
-    if (data->momentum_enabled && (event->code == INPUT_REL_WHEEL || event->code == INPUT_REL_HWHEEL) &&
+    if (data->momentum_enabled && !data->momentum_injecting &&
+        (event->code == INPUT_REL_WHEEL || event->code == INPUT_REL_HWHEEL) &&
         event->value != 0) {
+        int64_t now = k_uptime_get();
+        int64_t dt = now - data->momentum_last_event_ts;
+        if (data->momentum_last_event_ts == 0 || dt > MOMENTUM_DT_MAX_MS) {
+            dt = MOMENTUM_DT_MAX_MS;
+        } else if (dt < MOMENTUM_DT_MIN_MS) {
+            dt = MOMENTUM_DT_MIN_MS;
+        }
+        data->momentum_last_event_ts = now;
+
+        // Instantaneous speed in Q8 counts/sec from this event's size and the
+        // time since the previous wheel event.
+        int32_t instant = ((int32_t)event->value * 256000) / (int32_t)dt;
+
+        // Blend with the running estimate; reset outright on direction change
+        // or when switching between vertical and horizontal scrolling.
+        if (data->momentum_code != event->code ||
+            (instant > 0) != (data->momentum_velocity > 0)) {
+            data->momentum_velocity = instant;
+        } else {
+            data->momentum_velocity = (data->momentum_velocity + instant) / 2;
+        }
+
         data->momentum_source_dev = event->dev;
         data->momentum_code = event->code;
-        data->momentum_velocity = event->value;
-        k_work_cancel_delayable(&data->momentum_work);
-        k_work_reschedule(&data->momentum_work, K_MSEC(momentum_step_ms(data)));
+        data->momentum_out_accum = 0;
+        // Coasting starts only if no further real event arrives in this window.
+        k_work_reschedule(&data->momentum_work, K_MSEC(MOMENTUM_RELEASE_MS));
     }
 
     return ZMK_INPUT_PROC_CONTINUE;
